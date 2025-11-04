@@ -13,7 +13,7 @@ app.post("/generate", async (req, res) => {
   const r = await fetch("https://api.wavespeed.ai/v1/run/bytedance/seedream-v4", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${process.env.263e7f254b4d0c373f2af8f7a32a2f2504698ef3d2598038b6feff32dd6cca56}`,
+      "Authorization": `Bearer ${process.env.WAVESPEED_API_KEY}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({ prompt })
