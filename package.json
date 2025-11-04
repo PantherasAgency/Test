@@ -1,14 +1,10 @@
 {
   "name": "seedream-proxy",
   "version": "1.0.0",
-  "type": "module",
-  "private": true,
-  "engines": { "node": ">=18 <23" },
+  "type": "commonjs",
+  "main": "index.js",
   "scripts": {
-    "start": "node --trace-uncaught index.js"
+    "start": "node index.js"
   },
-  "dependencies": {
-    "express": "^4.19.2",
-    "node-fetch": "^3.3.2"
-  }
+  "engines": { "node": ">=18" }
 }
