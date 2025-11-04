@@ -394,79 +394,78 @@ app.get("/v1/automations/webhookKling25Turbo", async (req, res) => {
   }
 });
 
-// === WAN 2.2 Animate submit ===
-// Expects: { image, video, prompt, mode, resolution, seed }
-async function submitWanAnimateTask(payload) {
-  const resp = await fetch("https://api.wavespeed.ai/api/v3/wavespeed-ai/wan-2.2/animate", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${WAVESPEED_API_KEY}`,
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    throw new Error(`Wavespeed submit failed ${resp.status} ${txt}`);
-  }
-  const data = await resp.json();
-  const id = data?.data?.id;
-  if (!id) throw new Error(`Wavespeed submit returned no id: ${JSON.stringify(data)}`);
-  return id;
-}
-
 // === WAN 2.2 Animate (🎥 VID GEN WAN) ===
+// Uses table: tblpTowzUx7zqnb1h
+// Writes to attachment field: fldrH1H7td2bR7XXH (generated_outputs)
 app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
-  const baseId = req.query.baseId;
-  const recordId = req.query.recordId;
-
-  // Your WAN table + output field (IDs)
+  const baseId    = req.query.baseId;
+  const recordId  = req.query.recordId;
   const tableIdOrName = req.query.tableIdOrName || "tblpTowzUx7zqnb1h";
-  const fieldName = req.query.fieldName || "fldrH1H7td2bR7XXH"; // generated_outputs
+  const fieldName     = req.query.fieldName     || "fldrH1H7td2bR7XXH"; // generated_outputs
 
-  // Status + error (IDs)
-  const statusField = "fldy8EMZTQUvA4DhJ"; // Status
-  const errField    = "fld5hWtlqovhvT1sQ"; // err_msg
+  // Field IDs
+  const statusField = "fldy8EMZTQUvA4DhJ"; // Status (single select)
+  const errField    = "fld5hWtlqovhvT1sQ"; // err_msg (text)
 
   try {
-    if (!baseId || !recordId) return res.status(400).json({ ok: false, error: "baseId and recordId are required" });
-    if (!AIRTABLE_TOKEN || !WAVESPEED_API_KEY) return res.status(500).json({ ok: false, error: "Server missing AIRTABLE_TOKEN or WAVESPEED_API_KEY" });
+    if (!baseId || !recordId) {
+      return res.status(400).json({ ok: false, error: "baseId and recordId are required" });
+    }
+    if (!AIRTABLE_TOKEN || !WAVESPEED_API_KEY) {
+      return res.status(500).json({ ok: false, error: "Server missing AIRTABLE_TOKEN or WAVESPEED_API_KEY" });
+    }
 
+    // Make sure this record actually lives in THIS table
+    let record;
+    try {
+      record = await getAirtableRecord(baseId, tableIdOrName, recordId);
+    } catch {
+      const msg = `Record ${recordId} does not exist in table ${tableIdOrName}. Triggered from the wrong table/view.`;
+      console.error("[wan] GET record failed:", msg);
+      return res.status(422).json({ ok: false, error: msg });
+    }
+
+    // Flip to Generating first
     await patchAirtableRecord(baseId, tableIdOrName, recordId, {
       [statusField]: "Generating",
       [errField]: ""
     });
 
-    const record = await getAirtableRecord(baseId, tableIdOrName, recordId);
     const fields = record?.fields || {};
 
-    // Reference image (ID first, then name fallback)
+    // Reference image (attachment). Prefer field ID, fallback by name.
     const refArr = Array.isArray(fields["fldEVHt9vUwp43QHf"])
       ? fields["fldEVHt9vUwp43QHf"]
       : (Array.isArray(fields["sourceImg"]) ? fields["sourceImg"] : []);
     const imageUrl = refArr[0]?.url;
-    if (!imageUrl) throw new Error("No reference image found in field 'sourceImg'.");
+    if (!imageUrl) throw new Error("No reference image found (sourceImg).");
 
-    // Source video (by name; add more fallbacks if you use another name)
-    const vidArr = Array.isArray(fields["sourceVideo"]) ? fields["sourceVideo"] : [];
-    const videoUrl = vidArr[0]?.url || req.query.video;
-    if (!videoUrl) throw new Error("No source video found in field 'sourceVideo'.");
+    // Source video: attachment first, then URL-ish text fields, then ?video=
+    const vidAttach = Array.isArray(fields["sourceVideo"]) ? fields["sourceVideo"] : [];
+    const videoUrl =
+      vidAttach[0]?.url ||
+      (typeof fields["sourceVideoUrl"] === "string" ? fields["sourceVideoUrl"] : "") ||
+      (typeof fields["video"] === "string" ? fields["video"] : "") ||
+      req.query.video;
+    if (!videoUrl) throw new Error("No source video found (sourceVideo attachment or sourceVideoUrl/text).");
 
     // Prompt
-    const prompt = (fields["fldVsEiInf8zgJbkg"] || fields["chatgpt_prompt"] || req.query.prompt || "").toString().trim();
-    if (!prompt) throw new Error("Missing 'chatgpt_prompt'.");
+    const prompt = (fields["fldVsEiInf8zgJbkg"] || fields["chatgpt_prompt"] || req.query.prompt || "")
+      .toString().trim();
+    if (!prompt) throw new Error("Missing chatgpt_prompt.");
 
-    // Mode / resolution / seed (optional plain-name fields in your base)
-    const mode = (fields["mode"] || req.query.mode || "replace").toString().toLowerCase();   // "replace" | "animate"
-    const resolution = (fields["resolution"] || req.query.resolution || "720p").toString();   // "480p" | "720p"
+    // Mode / resolution / seed
+    let mode = (fields["mode"] || req.query.mode || "replace").toString().toLowerCase();
+    if (mode !== "replace" && mode !== "animate") mode = "replace";
+    const resolution = (fields["resolution"] || req.query.resolution || "720p").toString(); // "480p" | "720p"
     const seed = parseInt(fields["seed"] ?? req.query.seed ?? "-1", 10);
 
-    // Duration from single-select ID (values are strings like "5","8","10")
+    // Duration (single select "5","8","10" or plain)
     const durationChoice = fields["fld0903IezfdxheZl"] || fields["duration"] || "5";
     const durationStr = typeof durationChoice === "object" && durationChoice?.name ? durationChoice.name : String(durationChoice);
     const duration = parseInt(durationStr, 10) || 5;
 
-    // How many outputs from single-select ID fldyEoibZoFAAd5N9
+    // Number of outputs (single select 1/2/4 or plain)
     function readDesired(nField) {
       if (typeof nField === "number") return nField;
       if (typeof nField === "string") return parseInt(nField, 10);
@@ -478,24 +477,24 @@ app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
     if (!Number.isFinite(desired) || desired < 1) desired = 1;
     if (desired > 8) desired = 8;
 
-    // Optional model picker (stored; we still call wan-2.2/animate)
+    // Optional stored picker (we still hit wan-2.2/animate)
     const modelPicked = (fields["fldMXB312vy3JPTq3"] || fields["wan_model_to_use"] || "").toString();
 
     const timeoutSec = Math.max(60, Math.min(3600, parseInt(req.query.timeoutSec || "900", 10)));
     const perTaskTimeoutMs = timeoutSec * 1000;
     const MAX_CONCURRENCY = 4;
 
-    // Submit N jobs
-    const payload = { image: imageUrl, video: videoUrl, prompt, mode, resolution, seed };
+    // Submit jobs
+    const basePayload = { image: imageUrl, video: videoUrl, prompt, mode, resolution, seed, duration };
     const taskIds = await Promise.all(
-      Array.from({ length: desired }, () => submitWanAnimateTask(payload))
+      Array.from({ length: desired }, () => submitWanAnimateTask(basePayload))
     );
     console.log(`[wan] model=${modelPicked || "wan-2.2/animate"} submitting ${desired} ->`, taskIds);
 
     // Poll in batches
     const idBatches = chunk(taskIds, MAX_CONCURRENCY);
     const successes = [];
-    const failures = [];
+    const failures  = [];
 
     for (const batch of idBatches) {
       const results = await Promise.allSettled(batch.map(id => pollResult(id, perTaskTimeoutMs)));
@@ -504,7 +503,7 @@ app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
         if (r.status === "fulfilled") successes.push(...r.value);
         else failures.push({ id, error: r.reason?.message || String(r.reason) });
       });
-      // light spacing between batches so Wavespeed doesn’t sulk
+      // tiny breather so Wavespeed doesn't throw a tantrum
       await new Promise(r => setTimeout(r, 1500));
     }
 
@@ -512,8 +511,8 @@ app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
       throw new Error(`All tasks failed or timed out (${failures.length}/${desired}). Example: ${failures[0].id}: ${failures[0].error}`);
     }
 
-    // Append to generated_outputs (ID), don’t nuke old files
-    const existing = Array.isArray(fields[fieldName]) ? fields[fieldName].map(x => ({ url: x.url })) : [];
+    // Keep existing attachments by ID, append new URLs
+    const existing = Array.isArray(fields[fieldName]) ? fields[fieldName].map(x => ({ id: x.id })) : [];
     const newFiles = successes.map((url, i) => ({ url, filename: `wan_${Date.now()}_${i}.mp4` }));
     const finalAttachments = [...existing, ...newFiles];
 
@@ -544,6 +543,35 @@ app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
   }
 });
 
+/** Submit a WAN 2.2 Animate job and return requestId */
+async function submitWanAnimateTask({ image, video, prompt, mode, resolution, seed, duration }) {
+  const resp = await fetch("https://api.wavespeed.ai/api/v3/wavespeed-ai/wan-2.2/animate", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${WAVESPEED_API_KEY}`
+    },
+    body: JSON.stringify({
+      image,
+      video,
+      prompt,
+      mode,        // "replace" | "animate"
+      resolution,  // "480p" | "720p"
+      seed,        // -1 => random
+      duration     // some backends ignore, but we pass it through for billing/variants
+    })
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    throw new Error(`Wavespeed WAN 2.2 API Error (${resp.status}): ${txt || resp.statusText}`);
+  }
+
+  const json = await resp.json();
+  const requestId = json.requestId || json.id || json.predictionId;
+  if (!requestId) throw new Error("Wavespeed WAN 2.2 API: missing requestId in response");
+  return requestId;
+}
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`HTTP listening on ${PORT}`);
