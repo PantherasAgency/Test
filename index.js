@@ -194,34 +194,75 @@ app.get("/v1/automations/webhookKling21Std", async (req, res) => {
 
     const record = await getAirtableRecord(baseId, tableIdOrName, recordId);
     const fields = record?.fields || {};
-    const srcArr = Array.isArray(fields["fldpcNNeTNguuAWno"]) ? fields["fldpcNNeTNguuAWno"] : fields["sourceImg"] || [];
+
+    // source image: prefer field id, then name
+    const srcArr = Array.isArray(fields["fldpcNNeTNguuAWno"])
+      ? fields["fldpcNNeTNguuAWno"]
+      : (Array.isArray(fields["sourceImg"]) ? fields["sourceImg"] : []);
     const imageUrl = srcArr[0]?.url;
     if (!imageUrl) throw new Error("No image found in 'sourceImg' field");
 
-    const prompt = fields["chatgpt_prompt"] || "";
+    const prompt = (fields["chatgpt_prompt"] || "").toString().trim();
     if (!prompt) throw new Error("Missing chatgpt_prompt field");
 
     const duration = parseInt(fields["duration"] || "5", 10);
     const guidance_scale = 0.5;
     const negative_prompt = "blur, distort, and low quality";
 
-    const requestId = await submitKling21Task({ image: imageUrl, prompt, negative_prompt, duration, guidance_scale });
-    console.log("[kling21] submitted ->", requestId);
+    // ----- desired outputs: accept query, number, or single-select {name:"2"} -----
+    function readDesired(nField) {
+      if (typeof nField === "number") return nField;
+      if (typeof nField === "string") return parseInt(nField, 10);
+      if (nField && typeof nField === "object" && typeof nField.name === "string") return parseInt(nField.name, 10);
+      return NaN;
+    }
+    const desiredRaw = req.query.n ?? fields["amount_outputs"] ?? fields["Amount outputs"] ?? "1";
+    let desired = readDesired(desiredRaw);
+    if (!Number.isFinite(desired) || desired < 1) desired = 1;
+    if (desired > 8) desired = 8;
 
-    const outputs = await pollResult(requestId, 15 * 60 * 1000); // 15 min max
-    if (!outputs?.length) throw new Error("No video returned");
+    const timeoutSec = Math.max(60, Math.min(3600, parseInt(req.query.timeoutSec || "900", 10)));
+    const perTaskTimeoutMs = timeoutSec * 1000;
+    const MAX_CONCURRENCY = 4;
 
+    // submit N jobs
+    const submitPromises = Array.from({ length: desired }, () =>
+      submitKling21Task({ image: imageUrl, prompt, negative_prompt, duration, guidance_scale })
+    );
+    const taskIds = await Promise.all(submitPromises);
+    console.log(`[kling21] submitting ${desired} tasks ->`, taskIds);
+
+    // poll in batches
+    const idBatches = chunk(taskIds, MAX_CONCURRENCY);
+    const successes = [];
+    const failures = [];
+
+    for (const batch of idBatches) {
+      const results = await Promise.allSettled(batch.map(id => pollResult(id, perTaskTimeoutMs)));
+      results.forEach((r, idx) => {
+        const id = batch[idx];
+        if (r.status === "fulfilled") successes.push(...r.value);
+        else failures.push({ id, error: r.reason?.message || String(r.reason) });
+      });
+    }
+
+    if (!successes.length && failures.length) {
+      throw new Error(`All tasks failed or timed out (${failures.length}/${desired}). Example: ${failures[0].id}: ${failures[0].error}`);
+    }
+
+    // append videos, don't delete old ones
     const existing = Array.isArray(fields[fieldName]) ? fields[fieldName].map(x => ({ url: x.url })) : [];
-    const newFiles = outputs.map((url, i) => ({ url, filename: `kling_${Date.now()}_${i}.mp4` }));
+    const newFiles = successes.map((url, i) => ({ url, filename: `kling_${Date.now()}_${i}.mp4` }));
     const finalAttachments = [...existing, ...newFiles];
 
+    const hadFailures = failures.length > 0;
     await patchAirtableRecord(baseId, tableIdOrName, recordId, {
       [fieldName]: finalAttachments,
-      [statusField]: "Success",
-      [errField]: ""
+      [statusField]: hadFailures ? `Partial Success (${successes.length}/${desired})` : "Success",
+      [errField]: hadFailures ? failures.map(f => `${f.id}: ${f.error}`).join(" | ").slice(0, 1000) : ""
     });
 
-    res.json({ ok: true, recordId, added: outputs.length });
+    res.json({ ok: true, recordId, requested: desired, completed: successes.length, failed: failures.length });
   } catch (err) {
     console.error("[kling21] ERROR:", err.message);
     try {
@@ -230,7 +271,6 @@ app.get("/v1/automations/webhookKling21Std", async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`HTTP listening on ${PORT}`);
