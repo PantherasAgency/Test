@@ -272,6 +272,29 @@ app.get("/v1/automations/webhookKling21Std", async (req, res) => {
   }
 });
 
+// === KLING 2.5 TURBO helper ===
+async function submitKling25TurboTask({ image, prompt, negative_prompt, duration, guidance_scale }) {
+  const resp = await fetch("https://api.wavespeed.ai/api/v3/kwaivgi/kling-v2.5-turbo-std/image-to-video", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${WAVESPEED_API_KEY}`
+    },
+    body: JSON.stringify({
+      image,
+      prompt,
+      negative_prompt,
+      duration,
+      guidance_scale
+    })
+  });
+  if (!resp.ok) throw new Error(`Wavespeed submit failed ${resp.status} ${await resp.text()}`);
+  const data = await resp.json();
+  const id = data?.data?.id;
+  if (!id) throw new Error(`Wavespeed submit returned no id: ${JSON.stringify(data)}`);
+  return id;
+}
+
 // === KLING 2.5 TURBO (image -> video) ===
 app.get("/v1/automations/webhookKling25Turbo", async (req, res) => {
   const baseId = req.query.baseId;
