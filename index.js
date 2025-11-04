@@ -1,49 +1,48 @@
-// index.js
-const http = require("http");
-const { URL } = require("url");
+// Minimal “ack fast” server
+const express = require("express");
 
-const PORT = process.env.PORT || 8080;   // use Railway's injected port
-const HOST = "0.0.0.0";                  // bind to all interfaces
+const app = express();
 
-const server = http.createServer(async (req, res) => {
-  // quick health check
-  if (req.url === "/health") {
-    res.writeHead(200, { "content-type": "text/plain" });
-    res.end("ok");
-    return;
+// Hello / health
+app.get("/", (_req, res) => res.type("text/plain").send("running"));
+app.get("/healthz", (_req, res) => res.json({ ok: true }));
+
+// Airtable webhook endpoint
+app.get("/v1/automations/webhookSeedanceEditGen", (req, res) => {
+  const { baseId, recordId, tableIdOrName, fieldName } = req.query;
+
+  // Bare minimum validation
+  if (!baseId || !recordId) {
+    return res.status(400).json({ ok: false, error: "Missing baseId or recordId" });
   }
 
-  // your webhook endpoint
-  if (req.method === "GET" && req.url.startsWith("/v1/automations/webhookSeedanceEditGen")) {
+  // Log so you can see it in Railway logs
+  console.log("[seedance-edit] received:", {
+    baseId,
+    recordId,
+    tableIdOrName: tableIdOrName || "(default)",
+    fieldName: fieldName || "(default)"
+  });
+
+  // 1) ACK IMMEDIATELY so Airtable is happy
+  res.status(200).json({ ok: true, recordId });
+
+  // 2) Do your heavy work *after* responding (non-blocking)
+  //    Replace this with your real job (Airtable API, Seedream, etc.)
+  queueMicrotask(async () => {
     try {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const baseId = url.searchParams.get("baseId");
-      const recordId = url.searchParams.get("recordId");
-      const tableIdOrName = url.searchParams.get("tableIdOrName") || "tblrTdaEKwrnLq1Jq";
-      const fieldName = url.searchParams.get("fieldName") || "Attachments";
-
-      // TODO: do your Airtable + Wavespeed work here
-      // await doWork({ baseId, recordId, tableIdOrName, fieldName });
-
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, recordId }));
-    } catch (e) {
-      console.error(e);
-      res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: e.message }));
+      // Example placeholder
+      console.log("[seedance-edit] starting async work for record:", recordId);
+      // ... your async pipeline goes here ...
+      console.log("[seedance-edit] finished async work for record:", recordId);
+    } catch (err) {
+      console.error("[seedance-edit] async error:", err);
     }
-    return;
-  }
-
-  // default root so you can verify it answers
-  res.writeHead(200, { "content-type": "text/plain" });
-  res.end("running");
+  });
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`HTTP listening on ${PORT}`);
+// Bind to Railway’s port on 0.0.0.0 (you already fixed the domain to 8080)
+const port = process.env.PORT || 8080;
+app.listen(port, "0.0.0.0", () => {
+  console.log(`HTTP listening on ${port}`);
 });
-
-// keep the process alive on unhandled errors instead of crashing
-process.on("uncaughtException", err => console.error("uncaughtException", err));
-process.on("unhandledRejection", err => console.error("unhandledRejection", err));
