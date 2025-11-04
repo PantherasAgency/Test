@@ -1,24 +1,14 @@
+// index.js
 import express from "express";
 import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-const PORT = process.env.PORT || 8080;
+// simple health/root so Railway's edge gets a 200
+app.get("/", (_req, res) => res.status(200).send("OK"));
 
-process.on("uncaughtException", e => {
-  console.error("uncaughtException:", e);
-});
-process.on("unhandledRejection", e => {
-  console.error("unhandledRejection:", e);
-});
-
-// Health / liveness. Railway hits this. Must be instant.
-app.get("/", (_req, res) => res.status(200).send("ok"));
-app.get("/health", (_req, res) => res.status(200).json({ status: "ok" }));
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
+// Wavespeed proxy endpoint
 app.post("/seedream/generate-and-update", async (req, res) => {
   try {
     const {
@@ -27,14 +17,15 @@ app.post("/seedream/generate-and-update", async (req, res) => {
       recordId,
       fieldName = "Attachments",
       prompt,
-      size = "2048*2048",
+      size = "2048*2048"
     } = req.body || {};
 
     if (!baseId || !tableIdOrName || !recordId || !prompt) {
       return res.status(400).json({ error: "Missing baseId, tableIdOrName, recordId, or prompt" });
     }
 
-    const submit = await fetch("https://api.wavespeed.ai/api/v3/bytedance/seedream-v4", {
+    // 1) submit job
+    const sub = await fetch("https://api.wavespeed.ai/api/v3/bytedance/seedream-v4", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${process.env.WAVESPEED_API_KEY}`,
@@ -47,71 +38,74 @@ app.post("/seedream/generate-and-update", async (req, res) => {
         size
       })
     });
-    const submitJson = await submit.json();
-    if (!submit.ok) return res.status(submit.status).json(submitJson);
 
-    const requestId = submitJson?.requestId || submitJson?.data?.requestId;
-    if (!requestId) return res.status(500).json({ error: "No requestId", raw: submitJson });
+    const subJson = await sub.json();
+    if (!sub.ok) return res.status(sub.status).json({ error: "wavespeed submit failed", subJson });
 
-    let imageUrl = null, resultJson = null;
+    const requestId = subJson?.requestId || subJson?.data?.requestId;
+    if (!requestId) return res.status(500).json({ error: "No requestId", raw: subJson });
+
+    // 2) poll
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    let imageUrl = null, last = null;
     for (let i = 0; i < 30; i++) {
       const r = await fetch(`https://api.wavespeed.ai/api/v3/predictions/${requestId}/result`, {
         headers: { "Authorization": `Bearer ${process.env.WAVESPEED_API_KEY}` }
       });
-      resultJson = await r.json();
-
-      const images = resultJson?.images || resultJson?.data?.images ||
-                     resultJson?.data?.output || resultJson?.output || [];
+      last = await r.json();
+      const images =
+        last?.images ||
+        last?.data?.images ||
+        last?.data?.output ||
+        last?.output || [];
       imageUrl = Array.isArray(images) ? images[0] : (images?.url || null);
-
-      const status = resultJson?.status || resultJson?.data?.status;
-      if (imageUrl || (status && ["succeeded","completed","success"].includes(status))) break;
+      if (imageUrl) break;
       await sleep(2000);
     }
-    if (!imageUrl) return res.status(502).json({ error: "No imageUrl", raw: resultJson });
+    if (!imageUrl) return res.status(502).json({ error: "No imageUrl", raw: last });
 
-    const at = await fetch(
-      `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableIdOrName)}/${recordId}`,
-      {
-        method: "PATCH",
-        headers: {
-          "Authorization": `Bearer ${process.env.AIRTABLE_TOKEN}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ fields: { [fieldName]: [{ url: imageUrl }] } })
-      }
-    );
+    // 3) update Airtable
+    const at = await fetch(`https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableIdOrName)}/${recordId}`, {
+      method: "PATCH",
+      headers: {
+        "Authorization": `Bearer ${process.env.AIRTABLE_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ fields: { [fieldName]: [{ url: imageUrl }] } })
+    });
     const atJson = await at.json();
     if (!at.ok) return res.status(at.status).json({ error: "Airtable update failed", atJson });
 
-    res.json({ success: true, requestId, imageUrl, airtable: atJson });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "generate-and-update failed", detail: String(err) });
+    return res.json({ success: true, requestId, imageUrl, airtable: atJson });
+  } catch (e) {
+    console.error("generate-and-update failed:", e);
+    return res.status(500).json({ error: "generate-and-update failed", detail: String(e) });
   }
 });
 
+// GET webhook for Airtable automations
 app.get("/v1/automations/webhookSeedanceEditGen", async (req, res) => {
-  const {
-    baseId,
-    recordId,
-    tableIdOrName = "tblrTdaEKwrnLq1Jq",
-    fieldName = "Attachments",
-  } = req.query;
-
   try {
-    let finalPrompt = req.query.prompt;
-    if (!finalPrompt) {
-      const rec = await fetch(
-        `https://api.airtable.com/v0/${baseId}/${tableIdOrName}/${recordId}`,
-        { headers: { "Authorization": `Bearer ${process.env.AIRTABLE_TOKEN}` } }
-      );
-      const recJson = await rec.json();
-      finalPrompt = recJson?.fields?.prompt || recJson?.fields?.Prompt || "";
-      if (!finalPrompt) return res.status(400).json({ error: "No prompt provided and record.fields.prompt is empty" });
+    const { baseId, recordId, prompt } = req.query;
+    const tableIdOrName = req.query.tableIdOrName || "tblrTdaEKwrnLq1Jq";
+    const fieldName = req.query.fieldName || "Attachments";
+    if (!baseId || !recordId) {
+      return res.status(400).json({ error: "Missing baseId or recordId" });
     }
 
-    const r = await fetch(`${req.protocol}://${req.get("host")}/seedream/generate-and-update`, {
+    // if no ?prompt=, fetch it from Airtable "prompt" field
+    let finalPrompt = prompt;
+    if (!finalPrompt) {
+      const r = await fetch(`https://api.airtable.com/v0/${baseId}/${tableIdOrName}/${recordId}`, {
+        headers: { "Authorization": `Bearer ${process.env.AIRTABLE_TOKEN}` }
+      });
+      const j = await r.json();
+      finalPrompt = j?.fields?.prompt || "";
+      if (!finalPrompt) return res.status(400).json({ error: "No prompt provided and record.fields.prompt empty" });
+    }
+
+    // call our POST route
+    const resp = await fetch("http://127.0.0.1:" + (process.env.PORT || 8080) + "/seedream/generate-and-update", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -124,14 +118,19 @@ app.get("/v1/automations/webhookSeedanceEditGen", async (req, res) => {
       })
     });
 
-    const data = await r.json();
-    res.status(r.status).json(data);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "webhookSeedanceEditGen failed", detail: String(err) });
+    const data = await resp.json();
+    return res.status(resp.status).json(data);
+  } catch (e) {
+    console.error("webhookSeedanceEditGen failed:", e);
+    return res.status(500).json({ error: "webhookSeedanceEditGen failed", detail: String(e) });
   }
 });
 
+// don’t let the process die silently
+process.on("unhandledRejection", err => { console.error("unhandledRejection", err); });
+process.on("uncaughtException", err => { console.error("uncaughtException", err); });
+
+const PORT = Number(process.env.PORT) || 8080;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`HTTP listening on ${PORT}`);
+  console.log("HTTP listening on", PORT);
 });
