@@ -161,6 +161,77 @@ app.get("/v1/automations/webhookSeedanceEditGen", async (req, res) => {
   }
 });
 
+// === KLING 2.1 VIDEO GENERATOR ===
+async function submitKling21Task({ image, prompt, negative_prompt, duration, guidance_scale }) {
+  const resp = await fetch("https://api.wavespeed.ai/api/v3/kwaivgi/kling-v2.1-i2v-standard", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${WAVESPEED_API_KEY}` },
+    body: JSON.stringify({
+      image,
+      prompt,
+      negative_prompt,
+      duration,
+      guidance_scale
+    })
+  });
+  if (!resp.ok) throw new Error(`Wavespeed submit failed ${resp.status} ${await resp.text()}`);
+  const data = await resp.json();
+  const id = data?.data?.id;
+  if (!id) throw new Error(`Wavespeed submit returned no id: ${JSON.stringify(data)}`);
+  return id;
+}
+
+app.get("/v1/automations/webhookKling21Std", async (req, res) => {
+  const baseId = req.query.baseId;
+  const recordId = req.query.recordId;
+  const tableIdOrName = req.query.tableIdOrName || "tblaauQEiqREQUhHq"; // 🎥 VID GEN table id
+  const fieldName = req.query.fieldName || "generated_outputs";
+  const statusField = "Status";
+  const errField = "err_msg";
+
+  try {
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, { [statusField]: "Generating", [errField]: "" });
+
+    const record = await getAirtableRecord(baseId, tableIdOrName, recordId);
+    const fields = record?.fields || {};
+    const srcArr = Array.isArray(fields["fldpcNNeTNguuAWno"]) ? fields["fldpcNNeTNguuAWno"] : fields["sourceImg"] || [];
+    const imageUrl = srcArr[0]?.url;
+    if (!imageUrl) throw new Error("No image found in 'sourceImg' field");
+
+    const prompt = fields["chatgpt_prompt"] || "";
+    if (!prompt) throw new Error("Missing chatgpt_prompt field");
+
+    const duration = parseInt(fields["duration"] || "5", 10);
+    const guidance_scale = 0.5;
+    const negative_prompt = "blur, distort, and low quality";
+
+    const requestId = await submitKling21Task({ image: imageUrl, prompt, negative_prompt, duration, guidance_scale });
+    console.log("[kling21] submitted ->", requestId);
+
+    const outputs = await pollResult(requestId, 15 * 60 * 1000); // 15 min max
+    if (!outputs?.length) throw new Error("No video returned");
+
+    const existing = Array.isArray(fields[fieldName]) ? fields[fieldName].map(x => ({ url: x.url })) : [];
+    const newFiles = outputs.map((url, i) => ({ url, filename: `kling_${Date.now()}_${i}.mp4` }));
+    const finalAttachments = [...existing, ...newFiles];
+
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, {
+      [fieldName]: finalAttachments,
+      [statusField]: "Success",
+      [errField]: ""
+    });
+
+    res.json({ ok: true, recordId, added: outputs.length });
+  } catch (err) {
+    console.error("[kling21] ERROR:", err.message);
+    try {
+      await patchAirtableRecord(baseId, tableIdOrName, recordId, { [errField]: err.message, [statusField]: "Error" });
+    } catch (_) {}
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`HTTP listening on ${PORT}`);
 });
