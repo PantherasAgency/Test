@@ -272,6 +272,105 @@ app.get("/v1/automations/webhookKling21Std", async (req, res) => {
   }
 });
 
+// === KLING 2.5 TURBO (image -> video) ===
+app.get("/v1/automations/webhookKling25Turbo", async (req, res) => {
+  const baseId = req.query.baseId;
+  const recordId = req.query.recordId;
+
+  // Default to your dedicated table + output field
+  const tableIdOrName = req.query.tableIdOrName || "tbliEm1efdgbRIFMb"; // 🎥 VID GEN Kling 2.5 Turbo
+  const fieldName = req.query.fieldName || "generated_outputs";
+
+  const statusField = "Status";
+  const errField = "err_msg";
+
+  try {
+    if (!baseId || !recordId) return res.status(400).json({ ok: false, error: "baseId and recordId are required" });
+    if (!AIRTABLE_TOKEN || !WAVESPEED_API_KEY) return res.status(500).json({ ok: false, error: "Server missing AIRTABLE_TOKEN or WAVESPEED_API_KEY" });
+
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, { [statusField]: "Generating", [errField]: "" });
+
+    const record = await getAirtableRecord(baseId, tableIdOrName, recordId);
+    const fields = record?.fields || {};
+
+    // source image: prefer field id (fldxGFYOQAF1voks9), else name "sourceImg"
+    const srcArr = Array.isArray(fields["fldxGFYOQAF1voks9"])
+      ? fields["fldxGFYOQAF1voks9"]
+      : (Array.isArray(fields["sourceImg"]) ? fields["sourceImg"] : []);
+    const imageUrl = srcArr[0]?.url;
+    if (!imageUrl) throw new Error("No image found in 'sourceImg' field");
+
+    const prompt = (fields["chatgpt_prompt"] || fields["prompt"] || "").toString().trim();
+    if (!prompt) throw new Error("Missing chatgpt_prompt field");
+
+    const duration = parseInt(fields["duration"] || req.query.duration || "5", 10);
+    const guidance_scale = parseFloat(fields["guidance_scale"] || req.query.guidance_scale || "0.5");
+    const negative_prompt = (fields["negative_prompt"] || req.query.negative_prompt || "blur, distort, and low quality").toString();
+
+    // desired outputs: accept query ?n=, number field, or single-select {name:"2"}
+    function readDesired(nField) {
+      if (typeof nField === "number") return nField;
+      if (typeof nField === "string") return parseInt(nField, 10);
+      if (nField && typeof nField === "object" && typeof nField.name === "string") return parseInt(nField.name, 10);
+      return NaN;
+    }
+    const desiredRaw = req.query.n ?? fields["amount_outputs"] ?? fields["Amount outputs"] ?? "1";
+    let desired = readDesired(desiredRaw);
+    if (!Number.isFinite(desired) || desired < 1) desired = 1;
+    if (desired > 8) desired = 8;
+
+    const timeoutSec = Math.max(60, Math.min(3600, parseInt(req.query.timeoutSec || "900", 10)));
+    const perTaskTimeoutMs = timeoutSec * 1000;
+    const MAX_CONCURRENCY = 4;
+
+    // submit N jobs
+    const taskIds = await Promise.all(
+      Array.from({ length: desired }, () =>
+        submitKling25TurboTask({ image: imageUrl, prompt, negative_prompt, duration, guidance_scale })
+      )
+    );
+    console.log(`[kling25] submitting ${desired} tasks ->`, taskIds);
+
+    // poll in batches
+    const idBatches = chunk(taskIds, MAX_CONCURRENCY);
+    const successes = [];
+    const failures = [];
+
+    for (const batch of idBatches) {
+      const results = await Promise.allSettled(batch.map(id => pollResult(id, perTaskTimeoutMs)));
+      results.forEach((r, idx) => {
+        const id = batch[idx];
+        if (r.status === "fulfilled") successes.push(...r.value);
+        else failures.push({ id, error: r.reason?.message || String(r.reason) });
+      });
+    }
+
+    if (!successes.length && failures.length) {
+      throw new Error(`All tasks failed or timed out (${failures.length}/${desired}). Example: ${failures[0].id}: ${failures[0].error}`);
+    }
+
+    // append, don't replace
+    const existing = Array.isArray(fields[fieldName]) ? fields[fieldName].map(x => ({ url: x.url })) : [];
+    const newFiles = successes.map((url, i) => ({ url, filename: `kling25_${Date.now()}_${i}.mp4` }));
+    const finalAttachments = [...existing, ...newFiles];
+
+    const hadFailures = failures.length > 0;
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, {
+      [fieldName]: finalAttachments,
+      [statusField]: hadFailures ? `Partial Success (${successes.length}/${desired})` : "Success",
+      [errField]: hadFailures ? failures.map(f => `${f.id}: ${f.error}`).join(" | ").slice(0, 1000) : ""
+    });
+
+    res.json({ ok: true, recordId, requested: desired, completed: successes.length, failed: failures.length });
+  } catch (err) {
+    console.error("[kling25] ERROR:", err.message);
+    try {
+      await patchAirtableRecord(baseId, tableIdOrName, recordId, { [errField]: err.message, [statusField]: "Error" });
+    } catch (_) {}
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`HTTP listening on ${PORT}`);
 });
