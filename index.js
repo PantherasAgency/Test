@@ -1,182 +1,183 @@
-// index.js
-const express = require('express');
-const fetch = require('node-fetch'); // Railway has it, but import explicitly for sanity
+import express from "express";
 
-// --- ENV ---
-const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN;
-const WAVESPEED_API_KEY = process.env.WAVESPEED_API_KEY;
-
-// sanity checks
-if (!AIRTABLE_TOKEN) console.error('Missing AIRTABLE_TOKEN');
-if (!WAVESPEED_API_KEY) console.error('Missing WAVESPEED_API_KEY');
-
-// tiny helpers
-const wait = ms => new Promise(r => setTimeout(r, ms));
-
+// Use Node 18+ global fetch (no node-fetch import nonsense)
 const app = express();
-app.use(express.json());
+const PORT = process.env.PORT || 8080;
 
-// health
-app.get('/', (_req, res) => res.type('text/plain').send('running'));
+// ENV you must set in Railway
+const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN;          // "pat..."
+const WAVESPEED_API_KEY = process.env.WAVESPEED_API_KEY;    // wavespeed key
 
-/**
- * GET /v1/automations/webhookSeedanceEditGen
- * Query: baseId, recordId, tableIdOrName, fieldName
- */
-app.get('/v1/automations/webhookSeedanceEditGen', async (req, res) => {
-  const {
-    baseId,
-    recordId,
-    tableIdOrName = 'IMG GEN',       // adjust if your table is different
-    fieldName = 'Attachments'         // the Airtable attachments column
-  } = req.query;
+if (!AIRTABLE_TOKEN) console.error("Missing AIRTABLE_TOKEN");
+if (!WAVESPEED_API_KEY) console.error("Missing WAVESPEED_API_KEY");
 
-  console.log('[seedance-edit] received:', { baseId, recordId, tableIdOrName, fieldName });
+// Helpers
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function getAirtableRecord(baseId, tableIdOrName, recordId) {
+  const url = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableIdOrName)}/${encodeURIComponent(recordId)}`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` }
+  });
+  if (!resp.ok) throw new Error(`Airtable GET failed ${resp.status} ${await resp.text()}`);
+  return resp.json();
+}
+
+async function patchAirtableRecord(baseId, tableIdOrName, recordId, fields) {
+  const url = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableIdOrName)}`;
+  const body = { records: [{ id: recordId, fields }] };
+  const resp = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${AIRTABLE_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) throw new Error(`Airtable PATCH failed ${resp.status} ${await resp.text()}`);
+  return resp.json();
+}
+
+function resolutionToSize(resolutionField) {
+  // expects "2160x3840" etc; Wavespeed wants "2160*3840"
+  if (!resolutionField || typeof resolutionField !== "string") return "2160*3840";
+  const parts = resolutionField.toLowerCase().split("x").map(s => s.trim());
+  if (parts.length !== 2) return "2160*3840";
+  return `${parts[0]}*${parts[1]}`;
+}
+
+async function submitEditTask({ images, prompt, size }) {
+  const resp = await fetch("https://api.wavespeed.ai/api/v3/bytedance/seedream-v4/edit", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${WAVESPEED_API_KEY}`
+    },
+    body: JSON.stringify({
+      enable_base64_output: false,
+      enable_sync_mode: false,
+      images,
+      prompt,
+      size
+    })
+  });
+  if (!resp.ok) throw new Error(`Wavespeed submit failed ${resp.status} ${await resp.text()}`);
+  const data = await resp.json();
+  const id = data?.data?.id;
+  if (!id) throw new Error(`Wavespeed submit returned no id: ${JSON.stringify(data)}`);
+  return id;
+}
+
+async function pollResult(requestId, timeoutMs = 5 * 60 * 1000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const resp = await fetch(`https://api.wavespeed.ai/api/v3/predictions/${requestId}/result`, {
+      headers: { "Authorization": `Bearer ${WAVESPEED_API_KEY}` }
+    });
+    const json = await resp.json();
+
+    if (!resp.ok) throw new Error(`Wavespeed poll failed ${resp.status} ${JSON.stringify(json)}`);
+
+    const status = json?.data?.status;
+    if (status === "completed") {
+      const outputs = json?.data?.outputs || [];
+      return outputs;
+    }
+    if (status === "failed") {
+      const err = json?.data?.error || "unknown";
+      throw new Error(`Wavespeed task failed: ${err}`);
+    }
+    await sleep(1000);
+  }
+  throw new Error("Wavespeed poll timed out");
+}
+
+// Health
+app.get("/", (_, res) => res.type("text/plain").send("running"));
+
+// Webhook the Airtable script calls:
+// GET /v1/automations/webhookSeedanceEditGen?baseId=...&recordId=...&tableIdOrName=...&fieldName=...
+app.get("/v1/automations/webhookSeedanceEditGen", async (req, res) => {
+  const baseId = req.query.baseId;
+  const recordId = req.query.recordId;
+  const tableIdOrName = req.query.tableIdOrName || "IMG GEN";
+  const fieldName = req.query.fieldName || "Attachments";      // where we write images
+  const statusField = "Status";
+  const errField = "err_msg";
 
   if (!baseId || !recordId) {
-    return res.status(400).json({ ok: false, error: 'baseId and recordId are required' });
+    return res.status(400).json({ ok: false, error: "baseId and recordId are required" });
+  }
+  if (!AIRTABLE_TOKEN || !WAVESPEED_API_KEY) {
+    return res.status(500).json({ ok: false, error: "Server missing AIRTABLE_TOKEN or WAVESPEED_API_KEY" });
   }
 
-  // 1) Read the record so we can grab the input image(s)
-  const recordUrl = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableIdOrName)}/${encodeURIComponent(recordId)}`;
-  let record;
+  // Log that we started
+  console.log("[seedance-edit] received:", { baseId, recordId, tableIdOrName, fieldName });
+
   try {
-    const recResp = await fetch(recordUrl, {
-      headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` }
-    });
-    const recJson = await recResp.json();
-    if (!recResp.ok) {
-      console.error('[airtable-read] error:', recJson);
-      return res.status(502).json({ ok: false, step: 'read', error: recJson });
-    }
-    record = recJson;
-  } catch (e) {
-    console.error('[airtable-read] exception:', e);
-    return res.status(502).json({ ok: false, step: 'read', error: String(e) });
-  }
-
-  // You said the first 4 images are sources. Pull URLs from the Attachments column.
-  const attachments = (record.fields?.[fieldName] || [])
-    .filter(a => a && a.url)
-    .slice(0, 4)
-    .map(a => a.url);
-
-  if (attachments.length === 0) {
-    console.warn('[seedance-edit] no source images on record');
-    return res.status(200).json({ ok: true, recordId, note: 'no source images' });
-  }
-
-  // prompt: use your prompt field or hardcode one
-  const prompt =
-    record.fields?.prompt ||
-    'Use the first 4 images as a source for the face and body. Use the 5th image as a source for the outfit.';
-
-  // 2) Submit Seedream-v4/edit job
-  let requestId;
-  try {
-    const submit = await fetch('https://api.wavespeed.ai/api/v3/bytedance/seedream-v4/edit', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${WAVESPEED_API_KEY}`
-      },
-      body: JSON.stringify({
-        enable_base64_output: false,
-        enable_sync_mode: false,
-        images: attachments,      // array of URLs
-        prompt,
-        // size optional; omit to let model decide. Or: "1024*1536"
-      })
+    // mark as Generating
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, {
+      [statusField]: "Generating",
+      [errField]: ""
     });
 
-    const submitJson = await submit.json();
-    if (!submit.ok) {
-      console.error('[wavespeed-submit] error:', submit.status, submitJson);
-      return res.status(502).json({ ok: false, step: 'submit', error: submitJson });
-    }
-    requestId = submitJson?.data?.id;
-    console.log('[wavespeed-submit] requestId =', requestId);
-    if (!requestId) throw new Error('no requestId from wavespeed');
-  } catch (e) {
-    console.error('[wavespeed-submit] exception:', e);
-    return res.status(502).json({ ok: false, step: 'submit', error: String(e) });
-  }
+    // fetch record
+    const record = await getAirtableRecord(baseId, tableIdOrName, recordId);
+    const fields = record?.fields || {};
 
-  // 3) Poll result
-  let resultUrl;
-  try {
-    for (let i = 0; i < 120; i++) { // up to ~2 minutes
-      const poll = await fetch(`https://api.wavespeed.ai/api/v3/predictions/${requestId}/result`, {
-        headers: { Authorization: `Bearer ${WAVESPEED_API_KEY}` }
+    // attachments to edit come from face_reference
+    const faceRef = fields["face_reference"];
+    const prompt = fields["prompt"] || "";
+    const resolution = fields["resolution"] || fields["Resolution"] || "2160x3840";
+    const size = resolutionToSize(resolution);
+
+    const inputUrls =
+      Array.isArray(faceRef)
+        ? faceRef
+            .filter(x => x && x.url)
+            .map(x => x.url)
+            .slice(0, 10)   // API limit
+        : [];
+
+    if (inputUrls.length === 0) {
+      throw new Error("No input images in 'face_reference'");
+    }
+
+    // submit task
+    const requestId = await submitEditTask({ images: inputUrls, prompt, size });
+    console.log("[seedance-edit] task id:", requestId);
+
+    // poll for result
+    const outputs = await pollResult(requestId);
+    if (!outputs.length) throw new Error("Model returned no outputs");
+
+    // write back to Airtable as attachments
+    const attachments = outputs.map(url => ({ url }));
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, {
+      [fieldName]: attachments,
+      [statusField]: "Success",
+      [errField]: "",
+      // optional convenience writes:
+      "record_id": recordId
+    });
+
+    console.log("[seedance-edit] finished async work for record:", recordId);
+    res.json({ ok: true, recordId, outputs: outputs.length });
+
+  } catch (err) {
+    console.error("[seedance-edit] ERROR:", err?.message || err);
+    // try to write the error back so staff see it
+    try {
+      await patchAirtableRecord(baseId, tableIdOrName, recordId, {
+        [errField]: String(err?.message || err),
+        "Status": "error"
       });
-      const pollJson = await poll.json();
-
-      if (!poll.ok) {
-        console.error('[wavespeed-poll] error:', poll.status, pollJson);
-        return res.status(502).json({ ok: false, step: 'poll', error: pollJson });
-      }
-
-      const status = pollJson?.data?.status;
-      if (status === 'completed') {
-        const outs = pollJson?.data?.outputs || [];
-        resultUrl = outs[0];
-        console.log('[wavespeed-poll] completed:', resultUrl);
-        break;
-      }
-      if (status === 'failed') {
-        console.error('[wavespeed-poll] failed:', pollJson?.data?.error);
-        return res.status(502).json({ ok: false, step: 'poll', error: pollJson?.data?.error });
-      }
-      await wait(1000);
-    }
-  } catch (e) {
-    console.error('[wavespeed-poll] exception:', e);
-    return res.status(502).json({ ok: false, step: 'poll', error: String(e) });
+    } catch (_) { /* swallow secondary errors */ }
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
-
-  if (!resultUrl) {
-    return res.status(504).json({ ok: false, step: 'poll', error: 'timeout waiting for result' });
-  }
-
-  // 4) Write output back to Airtable Attachments field
-  try {
-    const patch = await fetch(recordUrl, {
-      method: 'PATCH',
-      headers: {
-        Authorization: `Bearer ${AIRTABLE_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        fields: {
-          [fieldName]: [{ url: resultUrl }],
-          Status: 'Success',
-          err_msg: ''
-        }
-      })
-    });
-
-    const patchJson = await patch.json();
-    if (!patch.ok) {
-      console.error('[airtable-write] error:', patch.status, patchJson);
-      return res.status(502).json({ ok: false, step: 'write', error: patchJson });
-    }
-  } catch (e) {
-    console.error('[airtable-write] exception:', e);
-    return res.status(502).json({ ok: false, step: 'write', error: String(e) });
-  }
-
-  res.json({ ok: true, recordId });
 });
 
-// keep Node from dying on unhandled stuff
-process.on('unhandledRejection', err => {
-  console.error('[unhandledRejection]', err);
-});
-process.on('uncaughtException', err => {
-  console.error('[uncaughtException]', err);
-});
-
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('HTTP listening on', PORT);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`HTTP listening on ${PORT}`);
 });
