@@ -424,7 +424,7 @@ app.get('/v1/automations/webhookKling25Turbo', async (req, res) => {
 // Tables your automations might accidentally fire from.
 // Add more tbl… IDs here if you insist on mixing triggers.
 const KNOWN_TABLES = [
-	'tblpTowzUx7zqnb1h', // 🎥 VID GEN WAN
+	'tblwcHLyoHVYauQBB', // 🎥 VID GEN WAN
 	'tbliEm1efdgbRIFMb', // KLING 2.5 Turbo (example from your setup)
 	'tblrTdaEKwrnLq1Jq', // IMG GEN (adjust if different)
 ];
@@ -474,10 +474,10 @@ async function submitWanAnimate({ image, mode, prompt, resolution, seed, video }
 
 app.get('/v1/automations/webhookWanAnimate', async (req, res) => {
 	const baseId = req.query.baseId;
-	const requestedTbl = req.query.tableIdOrName || 'tblpTowzUx7zqnb1h';
-	const fieldName = req.query.fieldName || 'fldrH1H7td2bR7XXH'; // generated_outputs (field ID)
-	const statusField = 'fldy8EMZTQUvA4DhJ'; // Status (field ID)
-	const errField = 'fld5hWtlqovhvT1sQ'; // err_msg (field ID)
+	const requestedTbl = req.query.tableIdOrName || 'tblwcHLyoHVYauQBB';
+	const fieldName = req.query.fieldName || 'fldahPs300jCTclSQ'; // generated_outputs (field ID)
+	const statusField = 'fldZwTUp3mFnGjbGW'; // Status (field ID)
+	const errField = 'fldQYd9OmUYU8Ja4y'; // err_msg (field ID)
 
 	function cleanRecId(v) {
 		if (!v) return '';
