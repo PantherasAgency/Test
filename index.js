@@ -526,7 +526,7 @@ app.get('/v1/automations/webhookWanAnimate', async (req, res) => {
 		const imageUrl = refArr[0]?.url;
 		if (!imageUrl) throw new Error('No reference image found (sourceImg).');
 
-		const vidAttach = Array.isArray(fields['sourceVideo']) ? fields['sourceVideo'] : [];
+		const vidAttach = Array.isArray(fields['fldAtJ5iexsu3QSc5']) ? fields['fldAtJ5iexsu3QSc5'] : [];
 		const videoUrl =
 			vidAttach[0]?.url ||
 			(typeof fields['sourceVideoUrl'] === 'string' ? fields['sourceVideoUrl'] : '') ||
