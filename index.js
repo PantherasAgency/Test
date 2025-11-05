@@ -475,7 +475,7 @@ async function submitWanAnimate({ image, mode, prompt, resolution, seed, video }
 app.get('/v1/automations/webhookWanAnimate', async (req, res) => {
 	const baseId = req.query.baseId;
 	const requestedTbl = 'tblwcHLyoHVYauQBB';
-	const fieldName = req.query.fieldName || 'fldahPs300jCTclSQ'; // generated_outputs (field ID)
+	const fieldName = 'fldahPs300jCTclSQ'; // generated_outputs (field ID)
 	const statusField = 'fldZwTUp3mFnGjbGW'; // Status (field ID)
 	const errField = 'fldQYd9OmUYU8Ja4y'; // err_msg (field ID)
 
