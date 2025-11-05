@@ -391,15 +391,50 @@ app.get("/v1/automations/webhookKling25Turbo", async (req, res) => {
   }
 });
 
-/* === WAN 2.2 ANIMATE (hardened) === */
-app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
-  const baseId       = req.query.baseId;
-  const tableIdOrName= req.query.tableIdOrName || "tblpTowzUx7zqnb1h";
-  const fieldName    = req.query.fieldName     || "fldrH1H7td2bR7XXH"; // generated_outputs (field ID)
-  const statusField  = "fldy8EMZTQUvA4DhJ"; // Status (field ID)
-  const errField     = "fld5hWtlqovhvT1sQ"; // err_msg (field ID)
+/* === WAN 2.2 ANIMATE (hardened, with table detector) === */
 
-  // sanitize ugly '"recXXXX"' values from formula fields etc.
+// Tables your automations might accidentally fire from.
+// Add more tbl… IDs here if you insist on mixing triggers.
+const KNOWN_TABLES = [
+  "tblpTowzUx7zqnb1h", // 🎥 VID GEN WAN
+  "tbliEm1efdgbRIFMb", // KLING 2.5 Turbo (example from your setup)
+  "tblrTdaEKwrnLq1Jq", // IMG GEN (adjust if different)
+];
+
+// Tell us exactly where a record lives, or complain with facts.
+async function assertRecordInTableOrExplain(baseId, expectedTbl, recId) {
+  async function probe(tbl) {
+    const url = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tbl)}/${encodeURIComponent(recId)}?returnFieldsByFieldId=true`;
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` } });
+    return { ok: r.ok, status: r.status, text: await r.text() };
+  }
+
+  const first = await probe(expectedTbl);
+  if (first.ok) return expectedTbl;
+
+  for (const tbl of KNOWN_TABLES) {
+    if (tbl === expectedTbl) continue;
+    const p = await probe(tbl);
+    if (p.ok) {
+      throw Object.assign(new Error(`Record ${recId} is in table ${tbl}, not ${expectedTbl}.`), {
+        code: "WRONG_TABLE",
+        actualTable: tbl,
+      });
+    }
+  }
+
+  throw Object.assign(new Error(`Record ${recId} not found in ${expectedTbl}. (${first.status}) ${first.text}`), {
+    code: "NOT_FOUND",
+  });
+}
+
+app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
+  const baseId        = req.query.baseId;
+  const requestedTbl  = req.query.tableIdOrName || "tblpTowzUx7zqnb1h";
+  const fieldName     = req.query.fieldName     || "fldrH1H7td2bR7XXH"; // generated_outputs (field ID)
+  const statusField   = "fldy8EMZTQUvA4DhJ"; // Status (field ID)
+  const errField      = "fld5hWtlqovhvT1sQ"; // err_msg (field ID)
+
   function cleanRecId(v) {
     if (!v) return "";
     const s = String(v).trim().replace(/^["']+|["']+$/g, "");
@@ -416,31 +451,28 @@ app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
       return res.status(500).json({ ok: false, error: "Server missing AIRTABLE_TOKEN or WAVESPEED_API_KEY" });
     }
 
-    // Verify the record actually lives in THIS table before touching anything
-    const recUrl = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableIdOrName)}/${encodeURIComponent(recordId)}`;
-    const recResp = await fetch(`${recUrl}?returnFieldsByFieldId=true`, {
-      headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` }
-    });
-    if (!recResp.ok) {
-      // Mirror Airtable's error so you don't chase ghosts
-      const txt = await recResp.text().catch(() => "");
-      const msg = `Record ${recordId} does not exist in table ${tableIdOrName}. (${recResp.status}) ${txt}`;
-      console.error("[wan] GET record failed:", msg);
-      return res.status(422).json({ ok: false, error: msg });
+    // Figure out where this record actually lives (and fail with a clear message if it’s not here)
+    let tableIdOrName;
+    try {
+      tableIdOrName = await assertRecordInTableOrExplain(baseId, requestedTbl, recordId);
+    } catch (e) {
+      console.error("[wan] GET record failed:", e.message);
+      return res.status(422).json({ ok: false, error: e.message, code: e.code, actualTable: e.actualTable });
     }
+
+    // Fetch with field IDs so we can preserve attachment ids
+    const recUrl = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableIdOrName)}/${encodeURIComponent(recordId)}?returnFieldsByFieldId=true`;
+    const recResp = await fetch(recUrl, { headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` } });
     const record = await recResp.json();
     const fields = record?.fields || {};
 
     // Flip to Generating
-    await patchAirtableRecord(baseId, tableIdOrName, recordId, {
-      [statusField]: "Generating",
-      [errField]: ""
-    });
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, { [statusField]: "Generating", [errField]: "" });
 
     // Inputs
     const refArr = Array.isArray(fields["fldEVHt9vUwp43QHf"])
       ? fields["fldEVHt9vUwp43QHf"]
-      : Array.isArray(fields["sourceImg"]) ? fields["sourceImg"] : [];
+      : (Array.isArray(fields["sourceImg"]) ? fields["sourceImg"] : []);
     const imageUrl = refArr[0]?.url;
     if (!imageUrl) throw new Error("No reference image found (sourceImg).");
 
@@ -519,34 +551,16 @@ app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
   } catch (err) {
     console.error("[wan] ERROR:", err?.message || err);
     try {
-      await patchAirtableRecord(baseId, (req.query.tableIdOrName || "tblpTowzUx7zqnb1h"), cleanRecId(req.query.recordId), {
-        [errField]: String(err?.message || err),
-        [statusField]: "Error"
-      });
+      await patchAirtableRecord(
+        baseId,
+        (req.query.tableIdOrName || "tblpTowzUx7zqnb1h"),
+        String(req.query.recordId || "").trim().replace(/^["']+|["']+$/g, ""),
+        { [errField]: String(err?.message || err), [statusField]: "Error" }
+      );
     } catch {}
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
-
-/** Submit a WAN 2.2 Animate job and return requestId */
-async function submitWanAnimateTask({ image, video, prompt, mode, resolution, seed, duration }) {
-  const resp = await fetch("https://api.wavespeed.ai/api/v3/wavespeed-ai/wan-2.2/animate", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${WAVESPEED_API_KEY}`
-    },
-    body: JSON.stringify({ image, video, prompt, mode, resolution, seed, duration })
-  });
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    throw new Error(`Wavespeed WAN 2.2 API Error (${resp.status}): ${txt || resp.statusText}`);
-  }
-  const json = await resp.json();
-  const requestId = json.requestId || json.id || json.predictionId;
-  if (!requestId) throw new Error("Wavespeed WAN 2.2 API: missing requestId in response");
-  return requestId;
-}
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`HTTP listening on ${PORT}`);
