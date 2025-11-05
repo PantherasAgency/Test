@@ -518,8 +518,8 @@ app.get('/v1/automations/webhookWanAnimate', async (req, res) => {
 		await patchAirtableRecord(baseId, tableIdOrName, recordId, { [statusField]: 'Generating', [errField]: '' });
 
 		// Inputs
-		const refArr = Array.isArray(fields['fldEVHt9vUwp43QHf'])
-			? fields['fldEVHt9vUwp43QHf']
+		const refArr = Array.isArray(fields['fldfgQZEx9gu1IXtR'])
+			? fields['fldfgQZEx9gu1IXtR']
 			: Array.isArray(fields['sourceImg'])
 			? fields['sourceImg']
 			: [];
