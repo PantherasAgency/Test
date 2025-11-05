@@ -562,6 +562,32 @@ app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
   }
 });
 
+app.get("/v1/automations/wan/diagnose", async (req, res) => {
+  const baseId = req.query.baseId;
+  const tableId = req.query.tableIdOrName || "tblpTowzUx7zqnb1h";
+  const recRaw  = (req.query.recordId || "").trim().replace(/^["']+|["']+$/g, "");
+  const recId   = (recRaw.match(/rec[0-9A-Za-z]{14}/) || [recRaw])[0];
+
+  try {
+    const url = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableId)}/${encodeURIComponent(recId)}?returnFieldsByFieldId=true`;
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` } });
+    const text = await r.text();
+    res.status(r.status).json({
+      ok: r.ok,
+      baseId, tableIdOrName: tableId, recordId: recId,
+      note: "If ok=false and status=422, the record is NOT in this table.",
+      airtableResponse: safeJson(text)
+    });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: String(e?.message || e) });
+  }
+
+  function safeJson(t){
+    try { return JSON.parse(t); } catch { return t; }
+  }
+});
+
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`HTTP listening on ${PORT}`);
 });
