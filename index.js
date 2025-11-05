@@ -391,38 +391,56 @@ app.get("/v1/automations/webhookKling25Turbo", async (req, res) => {
   }
 });
 
-/* === WAN 2.2 ANIMATE === */
+/* === WAN 2.2 ANIMATE (hardened) === */
 app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
-  const baseId = req.query.baseId;
-  const recordId = req.query.recordId;
-  const tableIdOrName = req.query.tableIdOrName || "tblpTowzUx7zqnb1h";
-  const fieldName = req.query.fieldName || "fldrH1H7td2bR7XXH"; // generated_outputs (field ID)
-  const statusField = "fldy8EMZTQUvA4DhJ"; // Status (field ID)
-  const errField = "fld5hWtlqovhvT1sQ"; // err_msg (field ID)
+  const baseId       = req.query.baseId;
+  const tableIdOrName= req.query.tableIdOrName || "tblpTowzUx7zqnb1h";
+  const fieldName    = req.query.fieldName     || "fldrH1H7td2bR7XXH"; // generated_outputs (field ID)
+  const statusField  = "fldy8EMZTQUvA4DhJ"; // Status (field ID)
+  const errField     = "fld5hWtlqovhvT1sQ"; // err_msg (field ID)
+
+  // sanitize ugly '"recXXXX"' values from formula fields etc.
+  function cleanRecId(v) {
+    if (!v) return "";
+    const s = String(v).trim().replace(/^["']+|["']+$/g, "");
+    const m = s.match(/rec[0-9A-Za-z]{14}/);
+    return m ? m[0] : s;
+  }
+  const recordId = cleanRecId(req.query.recordId);
 
   try {
-    if (!baseId || !recordId) return res.status(400).json({ ok: false, error: "baseId and recordId are required" });
-    if (!AIRTABLE_TOKEN || !WAVESPEED_API_KEY)
+    if (!baseId || !recordId) {
+      return res.status(400).json({ ok: false, error: "baseId and recordId are required" });
+    }
+    if (!AIRTABLE_TOKEN || !WAVESPEED_API_KEY) {
       return res.status(500).json({ ok: false, error: "Server missing AIRTABLE_TOKEN or WAVESPEED_API_KEY" });
+    }
 
-    let record;
-    try {
-      record = await getAirtableRecord(baseId, tableIdOrName, recordId);
-    } catch {
-      const msg = `Record ${recordId} does not exist in table ${tableIdOrName}. Triggered from the wrong table/view.`;
+    // Verify the record actually lives in THIS table before touching anything
+    const recUrl = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(tableIdOrName)}/${encodeURIComponent(recordId)}`;
+    const recResp = await fetch(`${recUrl}?returnFieldsByFieldId=true`, {
+      headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` }
+    });
+    if (!recResp.ok) {
+      // Mirror Airtable's error so you don't chase ghosts
+      const txt = await recResp.text().catch(() => "");
+      const msg = `Record ${recordId} does not exist in table ${tableIdOrName}. (${recResp.status}) ${txt}`;
       console.error("[wan] GET record failed:", msg);
       return res.status(422).json({ ok: false, error: msg });
     }
-
-    await patchAirtableRecord(baseId, tableIdOrName, recordId, { [statusField]: "Generating", [errField]: "" });
-
+    const record = await recResp.json();
     const fields = record?.fields || {};
 
+    // Flip to Generating
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, {
+      [statusField]: "Generating",
+      [errField]: ""
+    });
+
+    // Inputs
     const refArr = Array.isArray(fields["fldEVHt9vUwp43QHf"])
       ? fields["fldEVHt9vUwp43QHf"]
-      : Array.isArray(fields["sourceImg"])
-      ? fields["sourceImg"]
-      : [];
+      : Array.isArray(fields["sourceImg"]) ? fields["sourceImg"] : [];
     const imageUrl = refArr[0]?.url;
     if (!imageUrl) throw new Error("No reference image found (sourceImg).");
 
@@ -439,7 +457,7 @@ app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
 
     let mode = (fields["mode"] || req.query.mode || "replace").toString().toLowerCase();
     if (mode !== "replace" && mode !== "animate") mode = "replace";
-    const resolution = (fields["resolution"] || req.query.resolution || "720p").toString(); // "480p" | "720p"
+    const resolution = (fields["resolution"] || req.query.resolution || "720p").toString();
     const seed = parseInt(fields["seed"] ?? req.query.seed ?? "-1", 10);
 
     const durationChoice = fields["fld0903IezfdxheZl"] || fields["duration"] || "5";
@@ -463,16 +481,17 @@ app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
     const perTaskTimeoutMs = timeoutSec * 1000;
     const MAX_CONCURRENCY = 4;
 
+    // Submit WAN jobs
     const basePayload = { image: imageUrl, video: videoUrl, prompt, mode, resolution, seed, duration };
     const taskIds = await Promise.all(Array.from({ length: desired }, () => submitWanAnimateTask(basePayload)));
     console.log(`[wan] model=${modelPicked || "wan-2.2/animate"} submitting ${desired} ->`, taskIds);
 
+    // Poll in batches
     const idBatches = chunk(taskIds, MAX_CONCURRENCY);
     const successes = [];
     const failures = [];
-
     for (const batch of idBatches) {
-      const results = await Promise.allSettled(batch.map((id) => pollResult(id, perTaskTimeoutMs)));
+      const results = await Promise.allSettled(batch.map(id => pollResult(id, perTaskTimeoutMs)));
       results.forEach((r, idx) => {
         const id = batch[idx];
         if (r.status === "fulfilled") successes.push(...r.value);
@@ -480,23 +499,12 @@ app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
       });
       await sleep(1500);
     }
-
     if (!successes.length && failures.length) {
-      throw new Error(
-        `All tasks failed or timed out (${failures.length}/${desired}). Example: ${failures[0].id}: ${failures[0].error}`
-      );
+      throw new Error(`All tasks failed or timed out (${failures.length}/${desired}). Example: ${failures[0].id}: ${failures[0].error}`);
     }
 
-    // Preserve existing attachments by id, append new URLs
-    const idKeyUrl = `https://api.airtable.com/v0/${encodeURIComponent(baseId)}/${encodeURIComponent(
-      tableIdOrName
-    )}/${encodeURIComponent(recordId)}?returnFieldsByFieldId=true`;
-    const idKeyResp = await fetch(idKeyUrl, { headers: { Authorization: `Bearer ${AIRTABLE_TOKEN}` } });
-    if (!idKeyResp.ok) throw new Error(`Airtable GET(id-keys) failed ${idKeyResp.status} ${await idKeyResp.text()}`);
-    const recById = await idKeyResp.json();
-    const idKeyFields = recById?.fields || {};
-
-    const existing = Array.isArray(idKeyFields[fieldName]) ? idKeyFields[fieldName].map((x) => ({ id: x.id })) : [];
+    // Preserve existing attachments by id, append new
+    const existing = Array.isArray(fields[fieldName]) ? fields[fieldName].map(x => ({ id: x.id })) : [];
     const newFiles = successes.map((url, i) => ({ url, filename: `wan_${Date.now()}_${i}.mp4` }));
     const finalAttachments = [...existing, ...newFiles];
 
@@ -504,14 +512,17 @@ app.get("/v1/automations/webhookWanAnimate", async (req, res) => {
     await patchAirtableRecord(baseId, tableIdOrName, recordId, {
       [fieldName]: finalAttachments,
       [statusField]: hadFailures ? `Partial Success (${successes.length}/${desired})` : "Success",
-      [errField]: hadFailures ? failures.map((f) => `${f.id}: ${f.error}`).join(" | ").slice(0, 1000) : "",
+      [errField]: hadFailures ? failures.map(f => `${f.id}: ${f.error}`).join(" | ").slice(0, 1000) : ""
     });
 
     res.json({ ok: true, recordId, requested: desired, completed: successes.length, failed: failures.length, modelPicked });
   } catch (err) {
     console.error("[wan] ERROR:", err?.message || err);
     try {
-      await patchAirtableRecord(baseId, tableIdOrName, recordId, { [errField]: String(err?.message || err), [statusField]: "Error" });
+      await patchAirtableRecord(baseId, (req.query.tableIdOrName || "tblpTowzUx7zqnb1h"), cleanRecId(req.query.recordId), {
+        [errField]: String(err?.message || err),
+        [statusField]: "Error"
+      });
     } catch {}
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
@@ -523,16 +534,14 @@ async function submitWanAnimateTask({ image, video, prompt, mode, resolution, se
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${WAVESPEED_API_KEY}`,
+      Authorization: `Bearer ${WAVESPEED_API_KEY}`
     },
-    body: JSON.stringify({ image, video, prompt, mode, resolution, seed, duration }),
+    body: JSON.stringify({ image, video, prompt, mode, resolution, seed, duration })
   });
-
   if (!resp.ok) {
     const txt = await resp.text().catch(() => "");
     throw new Error(`Wavespeed WAN 2.2 API Error (${resp.status}): ${txt || resp.statusText}`);
   }
-
   const json = await resp.json();
   const requestId = json.requestId || json.id || json.predictionId;
   if (!requestId) throw new Error("Wavespeed WAN 2.2 API: missing requestId in response");
