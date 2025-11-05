@@ -534,7 +534,7 @@ app.get('/v1/automations/webhookWanAnimate', async (req, res) => {
 			req.query.video;
 		if (!videoUrl) throw new Error('No source video found (sourceVideo attachment or sourceVideoUrl/text).');
 
-		const prompt = (fields['fldVsEiInf8zgJbkg'] || fields['chatgpt_prompt'] || req.query.prompt || '')
+		const prompt = (fields['fldruD65OYSnU76Jv'] || fields['chatgpt_prompt'] || req.query.prompt || '')
 			.toString()
 			.trim();
 		if (!prompt) throw new Error('Missing chatgpt_prompt.');
