@@ -814,8 +814,8 @@ async function submitWavespeedInfiniteTalk({ image, audio, prompt, resolution, s
 app.get('/v1/automations/wavespeedInfiniteTalk', async (req, res) => {
   const baseId = req.query.baseId;
   const recordId = req.query.recordId;
-  const tableIdOrName = req.query.tableIdOrName || 'tbliEm1efdgbRIFMb';
-  const fieldName = req.query.fieldName || 'generated_outputs';
+  const tableIdOrName = req.query.tableIdOrName;
+  const fieldName = req.query.fieldName;
 
   const statusField = 'Status';
   const errField = 'err_msg';
