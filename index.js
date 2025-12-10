@@ -131,9 +131,9 @@ app.get('/v1/automations/webhookSeedanceEditGen', async (req, res) => {
 
     const inputUrls = Array.isArray(faceRef)
       ? faceRef
-          .filter((x) => x?.url)
-          .map((x) => x.url)
-          .slice(0, 10)
+        .filter((x) => x?.url)
+        .map((x) => x.url)
+        .slice(0, 10)
       : [];
     if (!inputUrls.length) throw new Error("No input images in 'face_reference'");
 
@@ -169,9 +169,9 @@ app.get('/v1/automations/webhookSeedanceEditGen', async (req, res) => {
       [statusField]: hadFailures ? `Partial Success (${successes.length}/${desired})` : 'Success',
       [errField]: hadFailures
         ? failures
-            .map((f) => `${f.id}: ${f.error}`)
-            .join(' | ')
-            .slice(0, 1000)
+          .map((f) => `${f.id}: ${f.error}`)
+          .join(' | ')
+          .slice(0, 1000)
         : '',
     });
 
@@ -184,7 +184,7 @@ app.get('/v1/automations/webhookSeedanceEditGen', async (req, res) => {
         [errField]: String(err?.message || err),
         [statusField]: 'Error',
       });
-    } catch {}
+    } catch { }
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
@@ -241,9 +241,9 @@ app.get('/v1/automations/webhookSeedance45EditGen', async (req, res) => {
 
     const inputUrls = Array.isArray(faceRef)
       ? faceRef
-          .filter((x) => x?.url)
-          .map((x) => x.url)
-          .slice(0, 10)
+        .filter((x) => x?.url)
+        .map((x) => x.url)
+        .slice(0, 10)
       : [];
     if (!inputUrls.length) throw new Error("No input images in 'face_reference'");
 
@@ -264,7 +264,7 @@ app.get('/v1/automations/webhookSeedance45EditGen', async (req, res) => {
       });
     }
 
-    if (!successes.length && failures.length) {
+    if (failures.length === desired) {
       throw new Error(
         `All tasks failed or timed out (${failures.length}/${desired}). Example: ${failures[0].id}: ${failures[0].error}`
       );
@@ -274,14 +274,14 @@ app.get('/v1/automations/webhookSeedance45EditGen', async (req, res) => {
     const finalAttachments = [...existing, ...successes.map((url) => ({ url }))];
 
     const hadFailures = failures.length > 0;
+    const statusValue =
+      successes.length === 0 ? 'Error' : hadFailures ? 'Partial Success' : 'Success';
+
     await patchAirtableRecord(baseId, tableIdOrName, recordId, {
       [fieldName]: finalAttachments,
-      [statusField]: hadFailures ? `Partial Success (${successes.length}/${desired})` : 'Success',
+      [statusField]: statusValue,
       [errField]: hadFailures
-        ? failures
-            .map((f) => `${f.id}: ${f.error}`)
-            .join(' | ')
-            .slice(0, 1000)
+        ? failures.map(f => `${f.id}: ${f.error}`).join(' | ').slice(0, 1000)
         : '',
     });
 
@@ -294,7 +294,7 @@ app.get('/v1/automations/webhookSeedance45EditGen', async (req, res) => {
         [errField]: String(err?.message || err),
         [statusField]: 'Error',
       });
-    } catch {}
+    } catch { }
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
@@ -330,8 +330,8 @@ app.get('/v1/automations/webhookKling21Std', async (req, res) => {
     const srcArr = Array.isArray(fields['fldpcNNeTNguuAWno'])
       ? fields['fldpcNNeTNguuAWno']
       : Array.isArray(fields['sourceImg'])
-      ? fields['sourceImg']
-      : [];
+        ? fields['sourceImg']
+        : [];
     const imageUrl = srcArr[0]?.url;
     if (!imageUrl) throw new Error("No image found in 'sourceImg' field");
 
@@ -392,9 +392,9 @@ app.get('/v1/automations/webhookKling21Std', async (req, res) => {
       [statusField]: hadFailures ? `Partial Success (${successes.length}/${desired})` : 'Success',
       [errField]: hadFailures
         ? failures
-            .map((f) => `${f.id}: ${f.error}`)
-            .join(' | ')
-            .slice(0, 1000)
+          .map((f) => `${f.id}: ${f.error}`)
+          .join(' | ')
+          .slice(0, 1000)
         : '',
     });
 
@@ -403,7 +403,7 @@ app.get('/v1/automations/webhookKling21Std', async (req, res) => {
     console.error('[kling21] ERROR:', err.message);
     try {
       await patchAirtableRecord(baseId, tableIdOrName, recordId, { [errField]: err.message, [statusField]: 'Error' });
-    } catch {}
+    } catch { }
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -446,8 +446,8 @@ app.get('/v1/automations/webhookKling25Turbo', async (req, res) => {
     const srcArr = Array.isArray(fields['fldxGFYOQAF1voks9'])
       ? fields['fldxGFYOQAF1voks9']
       : Array.isArray(fields['sourceImg'])
-      ? fields['sourceImg']
-      : [];
+        ? fields['sourceImg']
+        : [];
     const imageUrl = srcArr[0]?.url;
     if (!imageUrl) throw new Error("No image found in 'sourceImg' field");
 
@@ -513,9 +513,9 @@ app.get('/v1/automations/webhookKling25Turbo', async (req, res) => {
       [statusField]: hadFailures ? `Partial Success (${successes.length}/${desired})` : 'Success',
       [errField]: hadFailures
         ? failures
-            .map((f) => `${f.id}: ${f.error}`)
-            .join(' | ')
-            .slice(0, 1000)
+          .map((f) => `${f.id}: ${f.error}`)
+          .join(' | ')
+          .slice(0, 1000)
         : '',
     });
 
@@ -524,7 +524,7 @@ app.get('/v1/automations/webhookKling25Turbo', async (req, res) => {
     console.error('[kling25] ERROR:', err.message);
     try {
       await patchAirtableRecord(baseId, tableIdOrName, recordId, { [errField]: err.message, [statusField]: 'Error' });
-    } catch {}
+    } catch { }
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -625,8 +625,8 @@ app.get('/v1/automations/webhookWanAnimate', async (req, res) => {
     const refArr = Array.isArray(fields['fldfgQZEx9gu1IXtR'])
       ? fields['fldfgQZEx9gu1IXtR']
       : Array.isArray(fields['sourceImg'])
-      ? fields['sourceImg']
-      : [];
+        ? fields['sourceImg']
+        : [];
     const imageUrl = refArr[0]?.url;
     if (!imageUrl) throw new Error('No reference image found (sourceImg).');
 
