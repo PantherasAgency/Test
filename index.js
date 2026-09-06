@@ -1303,6 +1303,223 @@ app.get('/v1/automations/wavespeedKling26Pro', async (req, res) => {
   }
 });
 
+
+// --- wavespeed-seedream-v5.0-pro/edit ---
+async function submitWavespeedSeedreamV5ProEdit({ images, prompt, aspectRatio, resolution, outputFormat, promptOptimizationMode }) {
+  const resp = await fetch('https://api.wavespeed.ai/api/v3/bytedance/seedream-v5.0-pro/edit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${WAVESPEED_API_KEY}` },
+    body: JSON.stringify({
+      enable_base64_output: false,
+      enable_sync_mode: false,
+      images,
+      prompt,
+      ...(aspectRatio && { aspect_ratio: aspectRatio }),
+      resolution,
+      output_format: outputFormat,
+      prompt_optimization_mode: promptOptimizationMode,
+    }),
+  });
+  if (!resp.ok) throw new Error(`Wavespeed Seedream v5.0 Pro Edit failed ${resp.status} ${await resp.text()}`);
+  const data = await resp.json();
+  const id = data?.data?.id;
+  if (!id) throw new Error(`Wavespeed Seedream v5.0 Pro Edit returned no id: ${JSON.stringify(data)}`);
+  return id;
+}
+
+app.get('/v1/automations/wavespeedSeedreamV5ProEdit', async (req, res) => {
+  const baseId = req.query.baseId;
+  const recordId = req.query.recordId;
+  const tableIdOrName = req.query.tableIdOrName || 'tblc0v8j1PxVX6T2K';
+  const fieldName = req.query.fieldName || 'Attachments';
+
+  const statusField = 'Status';
+  const errField = 'err_msg';
+
+  try {
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, { [statusField]: 'Generating', [errField]: '' });
+
+    const record = await getAirtableRecord(baseId, tableIdOrName, recordId);
+    const fields = record?.fields || {};
+
+    const prompt = (fields['prompt'] || '').toString().trim();
+    if (!prompt) throw new Error('Missing prompt field');
+
+    const aspectRatio = (fields['aspect_ratio'] || '').toString().trim();
+    const resolution = (fields['resolution'] || '').toString().trim() || '1k';
+    const outputFormat = (fields['output_format'] || '').toString().trim() || 'jpeg';
+    const promptOptimizationMode = (fields['prompt_optimization_mode'] || '').toString().trim() || 'standard';
+
+    const n = parseInt(fields['amount_outputs'] || req.query.n || '1', 10);
+    const desired = Math.max(1, Math.min(8, n));
+
+    const timeoutSec = parseInt(req.query.timeoutSec || '900', 10);
+    const perTaskTimeoutMs = timeoutSec * 1000;
+    const MAX_CONCURRENCY = 4;
+
+    // identity refs first, then body/scene refs - API accepts max 10 images
+    const toUrls = (arr) => (Array.isArray(arr) ? arr.filter((x) => x?.url).map((x) => x.url) : []);
+    const inputUrls = [...toUrls(fields['face_reference']), ...toUrls(fields['body_reference'])].slice(0, 10);
+    if (!inputUrls.length) throw new Error("No input images in 'face_reference' or 'body_reference'");
+
+    const taskIds = await Promise.all(
+      Array.from({ length: desired }, () =>
+        submitWavespeedSeedreamV5ProEdit({ images: inputUrls, prompt, aspectRatio, resolution, outputFormat, promptOptimizationMode })
+      )
+    );
+    console.log(`[wavespeed-ai/seedream-v5.0-pro/edit] submitting ${desired} tasks ->`, taskIds);
+
+    const idBatches = chunk(taskIds, MAX_CONCURRENCY);
+
+    const successes = [];
+    const failures = [];
+
+    for (const batch of idBatches) {
+      const results = await Promise.allSettled(batch.map((id) => pollResult(id, perTaskTimeoutMs)));
+      results.forEach((r, i) =>
+        r.status === 'fulfilled'
+          ? successes.push(...r.value)
+          : failures.push({ id: batch[i], error: r.reason?.message })
+      );
+    }
+
+    const existing = Array.isArray(fields[fieldName]) ? fields[fieldName].map((x) => ({ url: x.url })) : [];
+    const finalAttachments = [...existing, ...successes.map((url) => ({ url }))];
+
+    const hadFailures = failures.length > 0;
+
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, {
+      [fieldName]: finalAttachments,
+      [statusField]: successes.length === 0 ? 'Error' : hadFailures ? 'Partial Success' : 'Success',
+      [errField]: hadFailures
+        ? failures
+          .map((f) => `${f.id}: ${f.error}`)
+          .join(' | ')
+          .slice(0, 1000)
+        : '',
+    });
+
+    console.log(`[wavespeed-ai/seedream-v5.0-pro/edit] outputs: ${successes.length}/${desired} for record ${recordId}`);
+
+    res.json({ ok: true, recordId, requested: desired, completed: successes.length, failed: failures.length });
+  } catch (err) {
+    console.error('[wavespeed-ai/seedream-v5.0-pro/edit] ERROR:', err.message);
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, { [errField]: err.message, [statusField]: 'Error' });
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+
+// --- wavespeed-seedance-2.5/image-to-video ---
+async function submitWavespeedSeedance25ImageToVideo({ image, lastImage, prompt, duration, resolution, generateAudio }) {
+  const resp = await fetch('https://api.wavespeed.ai/api/v3/bytedance/seedance-2.5/image-to-video', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${WAVESPEED_API_KEY}` },
+    body: JSON.stringify({
+      image,
+      ...(lastImage && { last_image: lastImage }),
+      prompt,
+      duration,
+      resolution,
+      generate_audio: generateAudio,
+    }),
+  });
+  if (!resp.ok) throw new Error(`Wavespeed Seedance 2.5 i2v failed ${resp.status} ${await resp.text()}`);
+  const data = await resp.json();
+  const id = data?.data?.id;
+  if (!id) throw new Error(`Wavespeed Seedance 2.5 i2v returned no id: ${JSON.stringify(data)}`);
+  return id;
+}
+
+app.get('/v1/automations/wavespeedSeedance25ImageToVideo', async (req, res) => {
+  const baseId = req.query.baseId;
+  const recordId = req.query.recordId;
+  const tableIdOrName = req.query.tableIdOrName || 'tblfoiEls9MfIGT92';
+  const fieldName = req.query.fieldName || 'generated_outputs';
+
+  const statusField = 'Status';
+  const errField = 'err_msg';
+
+  try {
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, { [statusField]: 'Generating', [errField]: '' });
+
+    const record = await getAirtableRecord(baseId, tableIdOrName, recordId);
+    const fields = record?.fields || {};
+
+    const imageArr = Array.isArray(fields['image']) ? fields['image'] : [];
+    const imageUrl = imageArr[0]?.url;
+    if (!imageUrl) throw new Error("No image found in 'image' field");
+
+    const endImageArr = Array.isArray(fields['end_image']) ? fields['end_image'] : [];
+    const lastImageUrl = endImageArr[0]?.url;
+
+    const prompt = (fields['prompt'] || '').toString().trim();
+    if (!prompt) throw new Error('Missing prompt field');
+
+    // API accepts 4-30 seconds, default 5
+    const durationRaw = parseInt(fields['duration'] || req.query.duration || '5', 10);
+    const duration = Number.isFinite(durationRaw) ? Math.max(4, Math.min(30, durationRaw)) : 5;
+
+    const resolution = (fields['resolution'] || '').toString().trim() || '720p';
+
+    // API default is true; only send false when the checkbox is explicitly unticked
+    const generateAudio = fields['generate_audio'] === true || fields['generate_audio'] === 'true';
+
+    const n = parseInt(fields['amount_outputs'] || req.query.n || '1', 10);
+    const desired = Math.max(1, Math.min(4, n));
+
+    const timeoutSec = parseInt(req.query.timeoutSec || '1800', 10);
+    const perTaskTimeoutMs = timeoutSec * 1000;
+    const MAX_CONCURRENCY = 4;
+
+    const taskIds = await Promise.all(
+      Array.from({ length: desired }, () =>
+        submitWavespeedSeedance25ImageToVideo({ image: imageUrl, lastImage: lastImageUrl, prompt, duration, resolution, generateAudio })
+      )
+    );
+    console.log(`[wavespeed-ai/seedance-2.5/i2v] submitting ${desired} tasks ->`, taskIds);
+
+    const idBatches = chunk(taskIds, MAX_CONCURRENCY);
+
+    const successes = [];
+    const failures = [];
+
+    for (const batch of idBatches) {
+      const results = await Promise.allSettled(batch.map((id) => pollResult(id, perTaskTimeoutMs)));
+      results.forEach((r, i) =>
+        r.status === 'fulfilled'
+          ? successes.push(...r.value)
+          : failures.push({ id: batch[i], error: r.reason?.message })
+      );
+    }
+
+    const existing = Array.isArray(fields[fieldName]) ? fields[fieldName].map((x) => ({ url: x.url })) : [];
+    const newFiles = successes.map((url, i) => ({ url, filename: `seedance25_${Date.now()}_${i}.mp4` }));
+    const finalAttachments = [...existing, ...newFiles];
+
+    const hadFailures = failures.length > 0;
+
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, {
+      [fieldName]: finalAttachments,
+      [statusField]: hadFailures ? 'Error' : 'Success',
+      [errField]: hadFailures
+        ? failures
+          .map((f) => `${f.id}: ${f.error}`)
+          .join(' | ')
+          .slice(0, 1000)
+        : '',
+    });
+
+    console.log(`[wavespeed-ai/seedance-2.5/i2v] outputs: ${successes.length}/${desired} for record ${recordId}`);
+
+    res.json({ ok: true, recordId, requested: desired, completed: successes.length, failed: failures.length });
+  } catch (err) {
+    console.error('[wavespeed-ai/seedance-2.5/i2v] ERROR:', err.message);
+    await patchAirtableRecord(baseId, tableIdOrName, recordId, { [errField]: err.message, [statusField]: 'Error' });
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`HTTP listening on ${PORT}`);
 });
